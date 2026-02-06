@@ -7,7 +7,12 @@ from torch.profiler import profile, ProfilerActivity, record_function, schedule
 from lrn_sparseatt.masks import BooleanMask
 from lrn_sparseatt.attention import masked_attention, sparse_attention
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    filename="profiles/1_profile.log",
+    filemode="w",
+)
 
 
 def format_timing(t: float) -> str:
@@ -95,4 +100,7 @@ def run_profiles():
 
 if __name__ == "__main__":
     rows = run_profiles()
-    print(tabulate(rows, headers="keys"))
+    table = tabulate(rows, headers="keys", tablefmt="github")
+    print(table)
+    with open("profiles/1_profile_results.md", "w") as f:
+        f.write(table)
