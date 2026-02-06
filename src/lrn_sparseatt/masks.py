@@ -1,0 +1,103 @@
+from einops import rearrange
+import torch
+
+
+def boolean_mask_to_indices(mask: torch.Tensor) -> torch.Tensor:
+    """
+    Convert a boolean mask of shape (T, T) to indices of shape (M, 2) where M is the number of True values in the mask.
+    Each index pair (i, j) in the output corresponds to a True value in the input mask at position (i, j).
+
+    Args:
+        mask (torch.Tensor): A boolean tensor of shape (T, T).
+    Returns:
+        torch.Tensor: An integer tensor of shape (M, 2) containing the indices of the True values in the input mask.
+    """
+    indices = torch.nonzero(mask, as_tuple=False)
+    # shape (N, 2) where N is the number of True values
+    # indices columns are ( i, j)
+    return indices
+
+
+class AttentionMask:
+
+    def as_tensor(self, seq_len: int) -> torch.Tensor:
+        raise NotImplementedError
+
+    def to_indices(self) -> torch.Tensor:
+        raise NotImplementedError
+
+
+class BooleanMask(AttentionMask):
+    def __init__(self, mask: torch.Tensor):
+        super().__init__()
+        assert mask.dtype == torch.bool, "mask must be a boolean tensor"
+        self.mask = mask
+
+    def to_indices(self) -> torch.Tensor:
+        return boolean_mask_to_indices(self.mask)
+
+    def as_tensor(self, seq_len: int) -> torch.Tensor:
+        return self.mask
+
+    @staticmethod
+    def causal(
+        seq_len: int, device: torch.device = torch.device("cpu")
+    ) -> "BooleanMask":
+        mask = torch.triu(torch.ones((seq_len, seq_len), device=device), diagonal=1)
+        mask = mask.bool()
+        return BooleanMask(mask)
+
+    @staticmethod
+    def blockwise(
+        seq_len: int, block_size: int, device: torch.device = torch.device("cpu")
+    ) -> "BooleanMask":
+        mask = torch.ones((seq_len, seq_len), device=device).bool()
+        for i in range(0, seq_len, block_size):
+            mask[i : i + block_size, : i + block_size] = False
+        return BooleanMask(mask)
+
+    @staticmethod
+    def random(
+        seq_len: int, sparsity: float, device: torch.device = torch.device("cpu")
+    ) -> "BooleanMask":
+        # The generated mask has shape [T, T] and will have between 1 and T True values per row, randomly distributed.
+        mask = torch.zeros((seq_len, seq_len), dtype=torch.bool, device=device)
+        for i in range(seq_len):
+            num_true = max(1, int((1.0 - sparsity) * seq_len))
+            true_indices = torch.randperm(seq_len)[:num_true]
+            mask[i, true_indices] = True
+        return BooleanMask(mask)
+
+    def sparsity(self) -> float:
+        total_elements = self.mask.numel()
+        true_elements = self.mask.sum().item()
+        return 1.0 - (true_elements / total_elements)
+
+
+class SparseMask(AttentionMask):
+
+    def __init__(self, indices: torch.Tensor):
+        super().__init__()
+        assert (
+            indices.dim() == 2 and indices.size(-1) == 2
+        ), "indices must have shape (M, 2)"
+        self.indices = indices
+
+    def to_boolean_mask(self, seq_len: int) -> BooleanMask:
+        mask = torch.zeros(
+            (seq_len, seq_len),
+            dtype=torch.bool,
+            device=self.indices.device,
+        )
+        mask = rearrange(mask, "i j -> (i j)", i=seq_len, j=seq_len)
+        i = self.indices[:, 0]
+        j = self.indices[:, 1]
+        mask.scatter_(0, i * seq_len + j, True)
+        mask = rearrange(mask, "(i j) -> i j", i=seq_len, j=seq_len)
+        return BooleanMask(mask)
+
+    def as_tensor(self, seq_len: int) -> torch.Tensor:
+        return self.to_boolean_mask(seq_len).as_tensor(seq_len)
+
+    def to_indices(self) -> torch.Tensor:
+        return self.indices
