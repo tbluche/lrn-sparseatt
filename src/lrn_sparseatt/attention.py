@@ -1,4 +1,16 @@
 import torch
+from torch.nested import nested_tensor
+
+
+def full_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+) -> torch.Tensor:
+    head_dim = q.size(2)
+    attn_weights: torch.Tensor = torch.matmul(q, k.transpose(-2, -1)) / (head_dim**0.5)
+    attn_weights = torch.softmax(attn_weights, dim=-1)
+    return torch.matmul(attn_weights, v)
 
 
 def masked_attention(
@@ -50,3 +62,24 @@ def sparse_attention(
     out.index_add_(1, q_indices, weighted_vs)
 
     return out
+
+
+def sparse_attention_nested(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    indices: nested_tensor,
+) -> torch.Tensor:
+    n_heads, _, head_dim = q.size()
+
+    return torch.cat(
+        [
+            full_attention(
+                q[:, qi : qi + 1, :],
+                k.index_select(1, comp).view(n_heads, -1, head_dim),
+                v.index_select(1, comp).view(n_heads, -1, head_dim),
+            )
+            for qi, comp in enumerate(indices)
+        ],
+        dim=1,
+    )

@@ -1,5 +1,6 @@
 from einops import rearrange
 import torch
+from torch.nested import nested_tensor
 
 
 def boolean_mask_to_indices(mask: torch.Tensor) -> torch.Tensor:
@@ -16,6 +17,23 @@ def boolean_mask_to_indices(mask: torch.Tensor) -> torch.Tensor:
     # shape (N, 2) where N is the number of True values
     # indices columns are ( i, j)
     return indices
+
+
+def boolean_mask_to_nested_indices(mask: torch.Tensor) -> nested_tensor:
+    """
+    Convert a boolean mask of shape (T, T) to a nested list of indices where each sublist corresponds to the True values in each row of the mask.
+
+    Args:
+        mask (torch.Tensor): A boolean tensor of shape (T, T).
+    Returns:
+        nested_tensor: A nested tensor where the outer list has length T and each inner list contains the column indices of the True values in the corresponding row of the input mask.
+    """
+    nested_indices = []
+    for i in range(mask.size(0)):
+        true_indices = torch.nonzero(mask[i], as_tuple=False).flatten()
+        nested_indices.append(true_indices)
+    nested_indices = nested_tensor(nested_indices, layout=torch.jagged)
+    return nested_indices
 
 
 class AttentionMask:
