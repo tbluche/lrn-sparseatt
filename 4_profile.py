@@ -8,15 +8,14 @@ from torch.profiler import profile, ProfilerActivity, record_function, schedule
 from lrn_sparseatt.masks import BooleanMask, boolean_mask_to_jagged_indices
 from lrn_sparseatt.attention import (
     masked_attention,
-    sparse_attention,
-    sparse_attention_1,
     sparse_attention_2,
+    sparse_attention_3,
 )
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    filename="profiles/3_profile_bis.log",
+    filename="profiles/4_profile.log",
     filemode="w",
 )
 
@@ -65,20 +64,6 @@ def profile_attention(
 
     dense_time = prof.key_averages().self_cpu_time_total / (N_RUNS - 20)
 
-    with profile_and_report("sparse") as prof:
-        for _ in range(N_RUNS):
-            sparse_attention(q, k, v, indices)
-            prof.step()
-
-    sparse_time = prof.key_averages().self_cpu_time_total / (N_RUNS - 20)
-
-    with profile_and_report("sparse_1") as prof:
-        for _ in range(N_RUNS):
-            sparse_attention_1(q, k, v, indices)
-            prof.step()
-
-    sparse_1_time = prof.key_averages().self_cpu_time_total / (N_RUNS - 20)
-
     with profile_and_report("sparse_2") as prof:
         for _ in range(N_RUNS):
             sparse_attention_2(q, k, v, indices, k_indices, q_offsets)
@@ -86,7 +71,14 @@ def profile_attention(
 
     sparse_2_time = prof.key_averages().self_cpu_time_total / (N_RUNS - 20)
 
-    return dense_time / 1e6, sparse_time / 1e6, sparse_1_time / 1e6, sparse_2_time / 1e6
+    with profile_and_report("sparse_3") as prof:
+        for _ in range(N_RUNS):
+            sparse_attention_3(q, k, v, k_indices, q_offsets)
+            prof.step()
+
+    sparse_3_time = prof.key_averages().self_cpu_time_total / (N_RUNS - 20)
+
+    return dense_time / 1e6, sparse_2_time / 1e6, sparse_3_time / 1e6
 
 
 def run_profiles():
@@ -106,7 +98,7 @@ def run_profiles():
             f"[{case_num+1}/{len(CASES)}] Profiling attention with "
             f"seq_len={seq_len}, d_model={d_model}, n_heads={n_heads}, sparsity={sparsity:.0%}"
         )
-        dense_time, sparse_time, sparse_1_time, sparse_2_time = profile_attention(
+        dense_time, sparse_2_time, sparse_3_time = profile_attention(
             seq_len, d_model, n_heads, sparsity
         )
         rows.append(
@@ -116,9 +108,8 @@ def run_profiles():
                 "n_heads": n_heads,
                 "sparsity": f"{sparsity:.0%}",
                 "dense_time": format_timing(dense_time),
-                "sparse_time": format_timing(sparse_time),
-                "sparse_1_time": format_timing(sparse_1_time),
                 "sparse_2_time": format_timing(sparse_2_time),
+                "sparse_3_time": format_timing(sparse_3_time),
             }
         )
 
@@ -129,5 +120,5 @@ if __name__ == "__main__":
     rows = run_profiles()
     table = tabulate(rows, headers="keys", tablefmt="github")
     print(table)
-    with open("profiles/3_profile_results_bis.md", "w") as f:
+    with open("profiles/4_profile_results.md", "w") as f:
         f.write(table)

@@ -1,6 +1,6 @@
 import torch
 from torch.nested import nested_tensor
-from .ops import sparse_matmul
+from .ops import sparse_matmul, sparse_matmul_vo, sparse_attn
 
 
 def full_attention(
@@ -94,6 +94,56 @@ def sparse_attention_1(
     out.index_add_(1, q_indices, weighted_vs)
 
     return out
+
+
+def sparse_attention_2(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    indices: torch.Tensor,
+    k_indices: torch.Tensor,
+    q_offsets: torch.Tensor,
+) -> torch.Tensor:
+    # q, k, v have shape [H, T, D]
+    # attn_mask has shape [M, 2] where M is the number of True values in the original mask
+    n_heads, seq_len, head_dim = q.size()
+    assert n_heads == 1, "This implementation only supports n_heads=1 for simplicity"
+    q = q.squeeze(0)  # shape [T, D]
+    k = k.squeeze(0)  # shape [T, D]
+
+    attn_weights = sparse_matmul_vo(q, k, k_indices, q_offsets) / (head_dim**0.5)
+    attn_weights = attn_weights.unsqueeze(0)
+
+    q_indices = indices[:, 0].flatten()
+    kv_indices = indices[:, 1].flatten()
+    num = (attn_weights - attn_weights.max()).exp()
+    den = torch.index_add(torch.zeros((n_heads, seq_len)), 1, q_indices, num)
+    den = den.index_select(1, q_indices)
+    attn_weights = num / den
+
+    vs_indsel = v.index_select(1, kv_indices).view(n_heads, -1, head_dim)
+    weighted_vs = attn_weights.unsqueeze(-1) * vs_indsel
+    out = torch.zeros((n_heads, seq_len, head_dim))
+    out.index_add_(1, q_indices, weighted_vs)
+
+    return out
+
+
+def sparse_attention_3(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    k_indices: torch.Tensor,
+    q_offsets: torch.Tensor,
+) -> torch.Tensor:
+    n_heads, _, head_dim = q.size()
+    assert n_heads == 1, "This implementation only supports n_heads=1 for simplicity"
+    q = q.squeeze(0)  # shape [T, D]
+    k = k.squeeze(0)  # shape [T, D]
+    v = v.squeeze(0)  # shape [T, D]
+
+    out = sparse_attn(q, k, v, k_indices, q_offsets, head_dim**0.5)
+    return out.unsqueeze(0)
 
 
 def sparse_attention_nested(
