@@ -36,6 +36,35 @@ def boolean_mask_to_nested_indices(mask: torch.Tensor) -> nested_tensor:
     return nested_indices
 
 
+def boolean_mask_to_jagged_indices(
+    mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Convert a boolean mask of shape (T, T) to jagged indices represented by a pair of tensors: (values, offsets).
+    The 'values' tensor contains the column indices of the True values in the input mask, and the 'offsets'
+    tensor contains the ending index of each row in the 'values' tensor
+
+    Args:
+        mask (torch.Tensor): A boolean tensor of shape (T, T).
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: A pair of tensors (values, offsets) where 'values' is a
+          1D tensor containing the column indices of the True values in the input mask, and 'offsets'
+          is a 1D tensor containing the ending index of each row in the 'values' tensor.
+    """
+    values = []
+    offsets = []
+    last_offset = 0
+    for i in range(mask.size(0)):
+        true_indices = torch.nonzero(mask[i], as_tuple=False).flatten()
+        values.append(true_indices)
+        offsets.append(last_offset + len(true_indices))
+        last_offset = offsets[-1]
+    values = torch.cat(values)
+    offsets = torch.tensor(offsets, device=mask.device)
+    return values, offsets
+
+
 class AttentionMask:
 
     def as_tensor(self, seq_len: int) -> torch.Tensor:
