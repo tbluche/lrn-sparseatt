@@ -12,3 +12,4 @@ wheels/
 .ipynb_checkpoints/
 sandbox/
 .DS_Store
+*.so
