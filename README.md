@@ -16,7 +16,9 @@ To this end, I decided to try and implement different ways of computing attentio
 
 The attention mechanism computes new representations $Y \in \mathcal{R}^{N_q \times d_v}$ as weighted averages of value vectors $V \in \mathcal{R}^{N_v \times d_v}$:
 
-$$ y_i = \sum_{j=1}^{N_v} a_{ij} v_j ~;~ i \in \{1 ... N_q\}$$
+$$ y_i = \sum_{j=1}^{N_v} a_{ij} v_j $$
+
+for $i \in \{1 ... N_q\}$.
 
 The weights of the averages are computed using the dot-product similarity of query and key vectors $Q \in \mathcal{R}^{N_q \times d_k}$ and $K \in \mathcal{R}^{N_v \times d_k}$:
 
@@ -38,10 +40,17 @@ For example, in training batches with different cardinality of inputs, some of t
 Another example is causal attention for sequential inputs, where $\mathcal{C}(t) = \{1 ... t\}$, with $\{t+1 ... N_v\}$ being future items that we don't want to consider at $t$.
 
 In these situations, we want to compute $Y$ as:
-$$ y_i = \sum_{j \in \mathcal{C}(i)} a_{ij} v_j ~~;~~  a_{ij} = \frac{e^{q_i^T k_j}}{\sum_{m \in \mathcal{C}(i)} e^{q_i^T k_m}} $$
+
+$$ y_i = \sum_{j \in \mathcal{C}(i)} a_{ij} v_j$$
+
+with:
+
+$$a_{ij} = \frac{e^{q_i^T k_j}}{\sum_{m \in \mathcal{C}(i)} e^{q_i^T k_m}}$$
 
 In practice, the computation in a vanilla implementation is achieved by multiplying the elements of the similarity matrix with an *attention mask* $\mathbf{M}$:
+
 $$ A = softmax\left(\frac{QK^T}{\sqrt{d_k}} \odot \mathbf{M} \right)$$
+
 with $m_{ij} = -\infty$ if $j \notin \mathcal{C}(i)$ and $1$ otherwise.
 
 This amounts to computing all the dot products $q_i^T k_j$ and replace those for which $j \notin \mathcal{C}(i)$ so that $a_{ij} = 0$.
