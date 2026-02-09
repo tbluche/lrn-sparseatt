@@ -21,12 +21,14 @@ def boolean_mask_to_indices(mask: torch.Tensor) -> torch.Tensor:
 
 def boolean_mask_to_nested_indices(mask: torch.Tensor) -> nested_tensor:
     """
-    Convert a boolean mask of shape (T, T) to a nested list of indices where each sublist corresponds to the True values in each row of the mask.
+    Convert a boolean mask of shape (T, T) to a nested list of indices where each sublist corresponds
+    to the True values in each row of the mask.
 
     Args:
         mask (torch.Tensor): A boolean tensor of shape (T, T).
     Returns:
-        nested_tensor: A nested tensor where the outer list has length T and each inner list contains the column indices of the True values in the corresponding row of the input mask.
+        nested_tensor: A nested tensor where the outer list has length T and each inner list contains
+          the column indices of the True values in the corresponding row of the input mask.
     """
     nested_indices = []
     for i in range(mask.size(0)):
@@ -36,7 +38,41 @@ def boolean_mask_to_nested_indices(mask: torch.Tensor) -> nested_tensor:
     return nested_indices
 
 
+def boolean_mask_to_jagged_indices(
+    mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Convert a boolean mask of shape (T, T) to jagged indices represented by a pair of tensors: (values, offsets).
+    The 'values' tensor contains the column indices of the True values in the input mask, and the 'offsets'
+    tensor contains the ending index of each row in the 'values' tensor
+
+    Args:
+        mask (torch.Tensor): A boolean tensor of shape (T, T).
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: A pair of tensors (values, offsets) where 'values' is a
+          1D tensor containing the column indices of the True values in the input mask, and 'offsets'
+          is a 1D tensor containing the ending index of each row in the 'values' tensor.
+    """
+    values = []
+    offsets = []
+    last_offset = 0
+    for i in range(mask.size(0)):
+        true_indices = torch.nonzero(mask[i], as_tuple=False).flatten()
+        values.append(true_indices)
+        offsets.append(last_offset + len(true_indices))
+        last_offset = offsets[-1]
+    values = torch.cat(values)
+    offsets = torch.tensor(offsets, device=mask.device)
+    return values, offsets
+
+
 class AttentionMask:
+    """Abstraction of an attention mask.
+
+    The attention mask can be represented in different formats (boolean tensor, indices, etc.)
+    and can be converted between them.
+    """
 
     def as_tensor(self, seq_len: int) -> torch.Tensor:
         raise NotImplementedError
@@ -46,6 +82,12 @@ class AttentionMask:
 
 
 class BooleanMask(AttentionMask):
+    """Implementation of a boolean attention mask.
+
+    The mask is represented as a boolean tensor of shape (T, T) where True indicates
+    positions that can attend to each other.
+    """
+
     def __init__(self, mask: torch.Tensor):
         super().__init__()
         assert mask.dtype == torch.bool, "mask must be a boolean tensor"
@@ -61,6 +103,8 @@ class BooleanMask(AttentionMask):
     def causal(
         seq_len: int, device: torch.device = torch.device("cpu")
     ) -> "BooleanMask":
+        """Create a causal attention mask of shape (T, T) where positions can only attend
+        to previous positions (including themselves)."""
         mask = torch.triu(torch.ones((seq_len, seq_len), device=device), diagonal=1)
         mask = mask.bool()
         return BooleanMask(mask)
@@ -69,6 +113,8 @@ class BooleanMask(AttentionMask):
     def blockwise(
         seq_len: int, block_size: int, device: torch.device = torch.device("cpu")
     ) -> "BooleanMask":
+        """Create a blockwise attention mask of shape (T, T) where positions can only attend
+        to positions within the same block of size block_size."""
         mask = torch.ones((seq_len, seq_len), device=device).bool()
         for i in range(0, seq_len, block_size):
             mask[i : i + block_size, : i + block_size] = False
@@ -78,6 +124,8 @@ class BooleanMask(AttentionMask):
     def random(
         seq_len: int, sparsity: float, device: torch.device = torch.device("cpu")
     ) -> "BooleanMask":
+        """Create a random attention mask of shape (T, T) where each position attends
+        to a random subset of other positions."""
         # The generated mask has shape [T, T] and will have between 1 and T True values per row, randomly distributed.
         mask = torch.zeros((seq_len, seq_len), dtype=torch.bool, device=device)
         for i in range(seq_len):
@@ -87,6 +135,7 @@ class BooleanMask(AttentionMask):
         return BooleanMask(mask)
 
     def sparsity(self) -> float:
+        """Compute the sparsity of the mask, defined as the fraction of False values in the mask."""
         total_elements = self.mask.numel()
         true_elements = self.mask.sum().item()
         return 1.0 - (true_elements / total_elements)

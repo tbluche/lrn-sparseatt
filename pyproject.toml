@@ -11,9 +11,14 @@ dependencies = [
     "torch",
     "einops",
     "numpy",
-    "tabulate"
+    "tabulate",
+    "tqdm"
 ]
 
 [build-system]
-requires = ["uv_build>=0.9.27,<0.10.0"]
-build-backend = "uv_build"
+requires = [
+    "setuptools",
+    "torch>=2.10.0",
+    "numpy",
+]
+build-backend = "setuptools.build_meta"
