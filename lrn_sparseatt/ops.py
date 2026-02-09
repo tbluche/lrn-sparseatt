@@ -5,7 +5,17 @@ __all__ = ["sparse_matmul"]
 
 
 def sparse_matmul(q: Tensor, k: Tensor, indices: Tensor) -> Tensor:
-    """Performs a * b + c in an efficient fused kernel"""
+    """Performs QK^T where the output is sparse and only computed at the locations specified by indices.
+
+    Args:
+        q: Query tensor of shape [T, D]
+        k: Key tensor of shape [T, D]
+        indices: Tensor of shape [M, 2] containing the indices of the True values in the attention mask.
+                 Each index pair (i, j) corresponds to a position in the output where the attention weight should be computed.
+
+    Returns:
+        Tensor of shape [M] containing the computed attention weights at the specified indices.
+    """
     return torch.ops.extension_cpp.sparse_matmul.default(q, k, indices)
 
 
@@ -15,7 +25,21 @@ def sparse_matmul_vo(
     k_indices: Tensor,
     q_offsets: Tensor,
 ) -> Tensor:
-    """Performs a * b + c in an efficient fused kernel, using separate k_indices and q_offsets"""
+    """Performs QK^T where the output is sparse and only computed at the locations specified by k_indices and q_offsets.
+
+    This is a variant of sparse_matmul that uses a different format for the indices, where k_indices contains
+    the key indices for all True values in the mask, and q_offsets contains the offsets for each query position
+    in k_indices.
+
+    Args:
+        q: Query tensor of shape [T, D]
+        k: Key tensor of shape [T, D]
+        k_indices: Tensor of shape [M] containing the key indices for all True values in the mask.
+        q_offsets: Tensor of shape [T] containing the ending offsets for each query position in k_indices.
+
+    Returns:
+        Tensor of shape [M] containing the computed attention weights at the specified indices.
+    """
     return torch.ops.extension_cpp.sparse_matmul_vo.default(q, k, k_indices, q_offsets)
 
 
@@ -27,17 +51,28 @@ def sparse_attn(
     q_offsets: Tensor,
     factor: float = 1.0,
 ) -> Tensor:
-    """Performs the full sparse attention computation in a single fused kernel"""
+    """Performs the full sparse attention computation in a single fused kernel.
+
+    This function computes the attention output for the query, key, and value tensors at the locations specified
+    by k_indices and q_offsets, and applies the scaling factor to the attention weights.
+
+    Args:
+        q: Query tensor of shape [T, D]
+        k: Key tensor of shape [T, D]
+        v: Value tensor of shape [T, D]
+        k_indices: Tensor of shape [M] containing the key indices for all True values in the mask.
+        q_offsets: Tensor of shape [T] containing the ending offsets for each query position in k_indices.
+        factor: Scaling factor to apply to the attention weights (default is 1.0).
+
+    Returns:
+        Tensor of shape [T, D] containing the computed attention output at the specified indices.
+    """
     assert factor > 0.0, "Expected factor to be positive, got {}".format(factor)
     return torch.ops.extension_cpp.sparse_attn.default(
         q, k, v, k_indices, q_offsets, factor
     )
 
 
-# Registers a FakeTensor kernel (aka "meta kernel", "abstract impl")
-# that describes what the properties of the output Tensor are given
-# the properties of the input Tensor. The FakeTensor kernel is necessary
-# for the op to work performantly with torch.compile.
 @torch.library.register_fake("extension_cpp::sparse_matmul")
 def _(q, k, indices):
     torch._check(q.shape[1] == k.shape[1])
@@ -80,29 +115,4 @@ def _(q, k, v, k_indices, q_offsets, factor):
     return torch.empty(q.shape[0], v.shape[1], device=q.device, dtype=q.dtype)
 
 
-# def _backward(ctx, grad):
-#     a, b = ctx.saved_tensors
-#     grad_a, grad_b = None, None
-#     if ctx.needs_input_grad[0]:
-#         grad_a = torch.ops.extension_cpp.mymul.default(grad, b)
-#     if ctx.needs_input_grad[1]:
-#         grad_b = torch.ops.extension_cpp.mymul.default(grad, a)
-#     return grad_a, grad_b, None
-
-
-# def _setup_context(ctx, inputs, output):
-#     a, b, c = inputs
-#     saved_a, saved_b = None, None
-#     if ctx.needs_input_grad[0]:
-#         saved_b = b
-#     if ctx.needs_input_grad[1]:
-#         saved_a = a
-#     ctx.save_for_backward(saved_a, saved_b)
-
-
-# # This adds training support for the operator. You must provide us
-# # the backward formula for the operator and a `setup_context` function
-# # to save values to be used in the backward.
-# torch.library.register_autograd(
-#     "extension_cpp::mymuladd", _backward, setup_context=_setup_context
-# )
+# TODO: implement backward functions for the above ops to enable autograd support

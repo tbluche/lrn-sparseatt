@@ -48,7 +48,8 @@ torch::stable::Tensor sparse_matmul_cpu(
   torch::stable::Tensor k_cont = torch::stable::contiguous(k);
   torch::stable::Tensor i_cont = torch::stable::contiguous(indices);
 
-  // Indices is a 2D tensor of shape (num_outputs, 2), where each row is a pair of (q_index, k_index) indicating a non-zero entry in the output.
+  // Indices is a 2D tensor of shape (num_outputs, 2), where each row is a pair of (q_index, k_index) 
+  // indicating a non-zero entry in the output.
   int64_t num_outputs = indices.sizes()[0];
   torch::stable::Tensor result = torch::stable::empty({num_outputs});
 
@@ -59,7 +60,6 @@ torch::stable::Tensor sparse_matmul_cpu(
   
 
   int64_t q_dim = q.sizes()[1]; // number of columns in q and k
-  float max = 0.0f;
   for (int64_t i = 0; i < num_outputs; i++) {
     int64_t q_index = indices_ptr[i * 2];
     int64_t k_index = indices_ptr[i * 2 + 1];
@@ -68,12 +68,7 @@ torch::stable::Tensor sparse_matmul_cpu(
       dot_product += q_ptr[q_index * q_dim + j] * k_ptr[k_index * q_dim + j];
     }
     result_ptr[i] = dot_product;
-    max = std::max(max, dot_product);
   }
-  // Optional: apply softmax normalization to the result
-  // for (int64_t i = 0; i < num_outputs; i++) {
-  //   result_ptr[i] = std::exp(result_ptr[i] - max);
-  // }
   return result;
 }
 
@@ -104,7 +99,6 @@ torch::stable::Tensor sparse_matmul_vo_cpu(
     torch::stable::Tensor q_cont = torch::stable::contiguous(q);
     torch::stable::Tensor k_cont = torch::stable::contiguous(k);
 
-    // Indices is a 2D tensor of shape (num_outputs, 2), where each row is a pair of (q_index, k_index) indicating a non-zero entry in the output.
     int64_t num_outputs = k_indices.sizes()[0];
     int64_t num_q = q.sizes()[0];
     torch::stable::Tensor result = torch::stable::empty({num_outputs});
@@ -120,7 +114,6 @@ torch::stable::Tensor sparse_matmul_vo_cpu(
     int64_t q_index = 0;
     int64_t current_offset = 0;
 
-    float max = 0.0f;
     for (int64_t i = 0; i < num_outputs; i++) {
       // Move to the next q_index if we've passed the current offset
       if (q_index < num_q && i >= offsets_ptr[q_index]) {
@@ -134,12 +127,7 @@ torch::stable::Tensor sparse_matmul_vo_cpu(
         dot_product += q_ptr[q_index * q_dim + j] * k_ptr[k_index * q_dim + j];
       }
       result_ptr[i] = dot_product;
-      max = std::max(max, dot_product);
     }
-    // Optional: apply softmax normalization to the result
-    // for (int64_t i = 0; i < num_outputs; i++) {
-    //   result_ptr[i] = std::exp(result_ptr[i] - max);
-    // }
     return result;
 
   }
@@ -180,7 +168,7 @@ torch::stable::Tensor sparse_attn_cpu(
     torch::stable::Tensor q_cont = torch::stable::contiguous(q);
     torch::stable::Tensor k_cont = torch::stable::contiguous(k);
     torch::stable::Tensor v_cont = torch::stable::contiguous(v);
-    // Indices is a 2D tensor of shape (num_outputs, 2), where each row is a pair of (q_index, k_index) indicating a non-zero entry in the output.
+
     int64_t num_outputs = k_indices.sizes()[0];
     int64_t num_q = q.sizes()[0];
     torch::stable::Tensor result = torch::stable::empty({num_outputs});
