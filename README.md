@@ -417,10 +417,136 @@ We see nice improvements over the pure PyTorch implementation but the C++ ops ar
 
 ## Step 4 - Full C++ implementation
 
+The previous implementation mostly improves because of the reduced `index_select` operations, at the cost on a non-vectorized dot product computation. As we can see in the [profiling logs](./profiles/3_profile_results_bis.md), the remaining index manipulations and data copies still take a lot of time:
+
+```
+-----------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                               Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg    # of Calls  
+-----------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                      ProfilerStep*         5.61%       7.704ms       100.00%     137.322ms       4.577ms            30  
+    extension_cpp::sparse_matmul_vo        25.79%      35.421ms        25.81%      35.441ms       1.181ms            30  
+                 aten::index_select        24.87%      34.149ms        24.87%      34.157ms     569.287us            60  
+                   aten::index_add_        23.28%      31.975ms        23.31%      32.008ms       1.067ms            30  
+                          aten::mul        15.15%      20.799ms        15.15%      20.799ms     693.316us            30  
+                    aten::index_add         0.02%      32.296us         2.93%       4.029ms     134.310us            30  
+                 aten::scatter_add_         2.89%       3.970ms         2.89%       3.972ms     132.394us            30  
+                        aten::zeros         0.02%      31.454us         0.68%     936.499us      15.608us            60  
+                        aten::zero_         0.01%      20.292us         0.64%     882.376us      14.706us            60  
+                        aten::fill_         0.63%     864.582us         0.63%     864.582us      14.410us            60  
+                          aten::div         0.57%     776.497us         0.59%     816.580us      13.610us            60  
+                          aten::exp         0.38%     526.582us         0.38%     526.582us      17.553us            30  
+                          aten::max         0.29%     404.421us         0.30%     416.251us      13.875us            30  
+                          aten::sub         0.25%     340.667us         0.25%     340.667us      11.356us            30  
+                       aten::select         0.04%      57.040us         0.05%      69.077us       0.576us           120  
+-----------------------------------  ------------  ------------  ------------  ------------  ------------  ------------
+```
+
+In this step, the rest of the attention computation (i.e. softmax on weights and averaging of values) is added to the C++ operation, resulting in a `sparse_attn` C++ op. 
+
+During the computation of dot products, the maximum value is tracked to stabilize the subsequent softmax.
+
+For the softmax computation, the exponential of the dot products is computed and accumulated in the corresponding softmax denominators:
+
+```cpp
+// Compute the denominator for the softmax normalization
+torch::stable::Tensor denominator = torch::stable::empty({num_q});
+denominator = torch::stable::zero_(denominator);
+float* denominator_ptr = denominator.mutable_data_ptr<float>();
+
+q_index = 0;
+current_offset = 0;
+for (int64_t i = 0; i < num_outputs; i++) {
+    double val = std::exp(dot_product[i] - max);
+    // result_ptr will hold the softmax numerators
+    result_ptr[i] = val;
+    // Handles the i indices for queries based on the offsets
+    if (q_index < num_q && i >= offsets_ptr[q_index]) {
+        q_index++;
+        current_offset = offsets_ptr[q_index];
+    }
+    denominator_ptr[q_index] += val;
+}
+```
+
+Finally the weighted sum of values is done in one pass as `y[i] += num[k] * V[k] / den[i]`:
+
+```cpp
+    q_index = 0;
+    current_offset = 0;
+    for (int64_t i = 0; i < num_outputs; i++) {
+      // Move to the next q_index if we've passed the current offset
+      if (q_index < num_q && i >= offsets_ptr[q_index]) {
+        q_index++;
+        current_offset = offsets_ptr[q_index];
+      }
+      int64_t out_index = indices_ptr[i];
+
+      float dot_product = 0.0f;
+      for (int64_t j = 0; j < v_dim; j++) {
+        output_ptr[q_index * v_dim + j] += result_ptr[i] * v_ptr[out_index * v_dim + j] / denominator_ptr[q_index];
+      }
+    }
+```
+
+The full profiling [logs](./profiles/4_profile.log) and [results](./profiles/4_profile_results.md) are available in the `profiles/` folder:
+
+|   seq_len |   d_model | sparsity   | dense_time   | sparse_2_time   | sparse_3_time   |
+|-----------|-----------|------------|--------------|-----------------|-----------------|
+|       512 |        32 | 95%        | 330.37 µs    | 559.26 µs       | 160.47 µs       |
+|       512 |        32 | 99%        | 329.25 µs    | 148.94 µs       | 37.59 µs        |
+|       512 |        64 | 95%        | 418.32 µs    | 784.11 µs       | 260.66 µs       |
+|       512 |        64 | 99%        | 334.64 µs    | 189.98 µs       | 59.25 µs        |
+|       512 |       128 | 95%        | 431.20 µs    | 1.41 ms         | 579.73 µs       |
+|       512 |       128 | 99%        | 424.45 µs    | 269.57 µs       | 142.39 µs       |
+|      1024 |        32 | 95%        | 1.39 ms      | 2.22 ms         | 668.28 µs       |
+|      1024 |        32 | 99%        | 1.35 ms      | 413.51 µs       | 134.94 µs       |
+|      1024 |        64 | 95%        | 1.45 ms      | 3.00 ms         | 1.09 ms         |
+|      1024 |        64 | 99%        | 1.46 ms      | 713.60 µs       | 243.67 µs       |
+|      1024 |       128 | 95%        | 1.81 ms      | 5.51 ms         | 2.26 ms         |
+|      1024 |       128 | 99%        | 1.59 ms      | 1.17 ms         | 474.15 µs       |
+|      2048 |        32 | 95%        | 5.25 ms      | 9.05 ms         | 2.65 ms         |
+|      2048 |        32 | 99%        | 5.22 ms      | 1.91 ms         | 539.95 µs       |
+|      2048 |        64 | 95%        | 5.60 ms      | 13.76 ms        | 4.61 ms         |
+|      2048 |        64 | 99%        | 5.39 ms      | 2.60 ms         | 936.98 µs       |
+|      2048 |       128 | 95%        | 6.54 ms      | 23.77 ms        | 9.46 ms         |
+|      2048 |       128 | 99%        | 6.48 ms      | 4.53 ms         | 1.83 ms         |
+
+This new implementation is 3-4x faster than the previous one, and 3 to 5 times faster than the masked attention baseline for very high levels of sparsity (>99%).
+
+For small `d_model`, it is even faster than the masked attention at 95% sparsity:
+
+|   seq_len |   d_model | sparsity   | dense_time   | sparse_3_time   |
+|-----------|-----------|------------|--------------|-----------------|
+|       512 |        32 | 95%        | 330.37 µs    | 160.47 µs       |
+|      1024 |        32 | 95%        | 1.39 ms      | 668.28 µs       |
+|      2048 |        32 | 95%        | 5.25 ms      | 2.65 ms         |
+|       512 |        64 | 95%        | 418.32 µs    | 260.66 µs       |
+|      1024 |        64 | 95%        | 1.45 ms      | 1.09 ms         |
+|      2048 |        64 | 95%        | 5.60 ms      | 4.61 ms         |
+|       512 |       128 | 95%        | 431.20 µs    | 579.73 µs       |
+|      1024 |       128 | 95%        | 1.81 ms      | 2.26 ms         |
+|      2048 |       128 | 95%        | 6.54 ms      | 9.46 ms         |
+
+And for the smallest `d_model` it is competitive at 90% sparsity:
+
+|   seq_len |   d_model | sparsity   | dense_time   | sparse_3_time   |
+|-----------|-----------|------------|--------------|-----------------|
+|       512 |        32 | 90%        | 324.73 µs    | 323.61 µs       |
+|      1024 |        32 | 90%        | 1.45 ms      | 1.33 ms         |
+|      2048 |        32 | 90%        | 5.49 ms      | 5.56 ms         |
+|       512 |        64 | 90%        | 354.19 µs    | 528.68 µs       |
+|      1024 |        64 | 90%        | 1.51 ms      | 2.14 ms         |
+|      2048 |        64 | 90%        | 6.18 ms      | 9.41 ms         |
+
+The good performance for small `d_model` could indicate that this implementation could be quite competitive with vectorized operations.
+
+## Step 5 - Back to pure PyTorch with Sparse tensors
+
+...
 
 ## Going further
 
-### Vectorized dot products
+### Vectorized operations
 
 Could we modify the `sparse_matmul` or even `sparse_attn` to vectorize the operations (in particular the dot products computations)?
 
