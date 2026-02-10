@@ -107,4 +107,329 @@ I consulted the following resources while iterating on this small project:
 
 ## Step 1 - Pure PyTorch implementation
 
+### Idea
+
+As a first step, I tried a pure PyTorch implementation. The idea is to only compute the $q_i^T k_j$ for $j \in \mathcal{C}(i)$ instead of a full $QK^T$ multiplication, i.e. replace
+
+```python
+torch.matmul(q, k.transpose(-2, -1))
+```
+
+with 
+
+```python
+(qs * ks).sum(dim=-1)
+```
+
+where `qs` and `ks` have shape `(M, D)` and `M` is the number of $(i, j)$ pairs satisfying $j \in \mathcal{C}(i)$. Said differently, these are the `Q[i]` and `K[j]` for all indices `[i, j]` where the attention mask is `True`.
+
+This amounts to computing the indices of non-zero elements of the boolean mask and gathering vectors from `Q` and `K`:
+
+```python
+indices = torch.nonzero(mask, as_tuple=False)
+qs = q.index_select(1, indices[: , 0])
+ks = k.index_select(1, indices[: , 1])
+```
+
+### Exploration
+
+This option is explored in [1_PyTorch Implementation.ipynb](./notebooks/1_PyTorch%20Implementation.ipynb).
+
+#### Dot products
+
+It looks like using `index_select` for this particular case is more efficient than using the `gather` operator.
+
+In the computation of the dot products, the direct implementation with elementwise multiplication and sum is sometimes faster than doing it with `torch.einsum`. 
+
+#### Softmax
+
+For the softmax normalization of the weights, instead of recomputing the whole $QK^T$ from the relevant dot products, I also limited computation to the attended locations.
+
+First, we compute the shifted exponential of all the computed $q_i^T k_j$:
+
+```python
+num = (attn_weights - attn_weights.max()).exp()
+```
+
+For the denominator of the softmax, we need to sum all the `num` values for each $i$. I used `index_add`:
+
+```python
+den = torch.index_add(
+    # One denominator per head and per query vector
+    torch.zeros((n_heads, seq_len)), 
+    # dim = 1 -> sequence length
+    1, 
+    # the 'i' part of the (i, j) list
+    q_indices, 
+    # num contains the [H, M] numerator values (exp)
+    num
+)
+```
+
+This does:
+
+```python
+i = q_indices[k]
+den[:, i] += num[:, k]
+```
+
+To finalize the computation, all numerators need to be divided by the corresponding denominator in `den`, so we copy `den` to all positions in `num`, again with `index_select`:
+
+```python
+attn_weights = num / den.index_select(1, q_indices)
+```
+
+Looking at the profiles, it looks like:
+- most of the time is spent on the indices manipulations
+- `index_add` is using `scatter_add`
+
+```
+----------------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                  Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg    # of Calls  
+----------------------  ------------  ------------  ------------  ------------  ------------  ------------  
+         ProfilerStep*        14.68%     266.957us       100.00%       1.819ms      60.631us            30  
+       aten::index_add         1.29%      23.461us        55.71%       1.013ms      33.775us            30  
+    aten::scatter_add_        53.62%     975.244us        53.65%     975.871us      32.529us            30  
+             aten::exp        12.95%     235.464us        12.95%     235.464us       7.849us            30  
+    aten::index_select         8.08%     147.012us         8.23%     149.677us       4.989us            30  
+             aten::max         2.99%      54.411us         3.41%      62.044us       2.068us            30  
+             aten::div         2.19%      39.877us         2.19%      39.877us       1.329us            30  
+             aten::sub         1.75%      31.877us         1.75%      31.877us       1.063us            30  
+           aten::zeros         0.49%       8.919us         0.87%      15.749us       0.525us            30  
+           aten::empty         0.81%      14.707us         0.81%      14.707us       0.163us            90  
+           aten::copy_         0.58%      10.584us         0.58%      10.584us       0.353us            30  
+         aten::flatten         0.22%       4.041us         0.22%       4.041us       0.067us            60  
+      aten::as_strided         0.18%       3.335us         0.18%       3.335us       0.111us            30  
+           aten::zero_         0.07%       1.291us         0.07%       1.291us       0.043us            30  
+           aten::fill_         0.06%       1.130us         0.06%       1.130us       0.038us            30  
+----------------------  ------------  ------------  ------------  ------------  ------------  ------------
+```
+
+#### Weighted sum
+
+Again, we use:
+
+- `index_select` to gather all value vectors with a non-zero attention weight (one we computed)
+- `index_add` to accumulate the weighted sum of values
+
+```python
+# Select values
+vs_indsel = v.index_select(1, kv_indices)
+vs_indsel = vs_indsel.view(n_heads, -1, head_dim)
+# Weigh values
+weighted_vs = attn_weights.unsqueeze(-1) * vs_indsel
+# Sum of weighted values
+out = torch.zeros((n_heads, seq_len, head_dim))
+out.index_add_(1, q_indices, weighted_vs)
+```
+
+#### Putting it all together
+
+Looking at the profiles of the implementation, we see that the `index_select` and `index_add` dominate the computation times:
+
+```
+
+
+-----------------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                   Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg    # of Calls  
+-----------------------  ------------  ------------  ------------  ------------  ------------  ------------  
+          ProfilerStep*         9.65%       1.397ms       100.00%      14.482ms     482.736us            30  
+       aten::index_add_        31.51%       4.563ms        31.67%       4.586ms     152.867us            30  
+     aten::index_select        24.86%       3.600ms        24.93%       3.611ms      30.088us           120  
+              aten::mul        14.77%       2.138ms        14.77%       2.138ms      35.639us            60  
+        aten::index_add         0.18%      25.835us         7.17%       1.039ms      34.635us            30  
+     aten::scatter_add_         6.87%     994.261us         6.87%     995.385us      33.180us            30  
+              aten::sum         6.20%     898.131us         6.38%     924.220us      30.807us            30  
+              aten::exp         2.70%     390.920us         2.70%     390.920us      13.031us            30  
+              aten::div         0.72%     104.168us         1.00%     144.421us       2.407us            60  
+              aten::max         0.45%      65.502us         0.51%      73.214us       2.440us            30  
+            aten::zeros         0.21%      30.045us         0.40%      57.291us       0.955us            60  
+           aten::select         0.27%      39.090us         0.35%      51.213us       0.427us           120  
+               aten::to         0.05%       7.297us         0.29%      41.377us       0.690us            60  
+              aten::sub         0.28%      39.958us         0.28%      39.958us       1.332us            30  
+             aten::view         0.24%      34.668us         0.24%      34.668us       0.385us            90  
+-----------------------  ------------  ------------  ------------  ------------  ------------  ------------ 
+```
+
+### Conclusions
+
+The full profiling [logs](./profiles/1_profile.log) and [results](./profiles/1_profile_results.md) are available in the `profiles/` folder.
+
+In the end, this implementation works but is not competitive. It is slightly better for very high levels of spasity:
+
+|   seq_len |   d_model |   n_heads | sparsity   | dense_time   | sparse_time   |
+|-----------|-----------|-----------|------------|--------------|---------------|
+|       512 |        64 |         1 | 99%        | 468.13 µs    | 334.99 µs     |
+|       512 |        64 |         4 | 99%        | 1.70 ms      | 417.64 µs     |
+|       512 |        64 |         8 | 99%        | 2.78 ms      | 570.55 µs     |
+|       512 |       256 |         1 | 99%        | 543.71 µs    | 906.73 µs     |
+|       512 |       256 |         4 | 99%        | 1.41 ms      | 1.05 ms       |
+|       512 |       256 |         8 | 99%        | 3.15 ms      | 1.06 ms       |
+|      1024 |        64 |         1 | 99%        | 1.47 ms      | 1.28 ms       |
+|      1024 |        64 |         4 | 99%        | 4.31 ms      | 1.50 ms       |
+|      1024 |        64 |         8 | 99%        | 10.21 ms     | 2.11 ms       |
+|      1024 |       256 |         1 | 99%        | 1.92 ms      | 3.41 ms       |
+|      1024 |       256 |         4 | 99%        | 5.17 ms      | 3.51 ms       |
+|      1024 |       256 |         8 | 99%        | 10.01 ms     | 3.56 ms       |
+
+But even with 95% sparsity, the alternative implementation doesn't beat the masked baseline except with many small heads:
+
+|   seq_len |   d_model |   n_heads | sparsity   | dense_time   | sparse_time   |
+|-----------|-----------|-----------|------------|--------------|---------------|
+|       512 |        64 |         1 | 95%        | 435.82 µs    | 1.58 ms       |
+|       512 |        64 |         4 | 95%        | 1.79 ms      | 2.07 ms       |
+|       512 |        64 |         8 | 95%        | 2.85 ms      | 2.48 ms       |
+|       512 |       256 |         1 | 95%        | 539.87 µs    | 3.91 ms       |
+|       512 |       256 |         4 | 95%        | 1.47 ms      | 4.20 ms       |
+|       512 |       256 |         8 | 95%        | 3.05 ms      | 4.40 ms       |
+|      1024 |        64 |         1 | 95%        | 1.54 ms      | 5.06 ms       |
+|      1024 |        64 |         4 | 95%        | 4.19 ms      | 6.64 ms       |
+|      1024 |        64 |         8 | 95%        | 10.91 ms     | 9.53 ms       |
+|      1024 |       256 |         1 | 95%        | 1.95 ms      | 18.36 ms      |
+|      1024 |       256 |         4 | 95%        | 5.68 ms      | 19.49 ms      |
+|      1024 |       256 |         8 | 95%        | 10.64 ms     | 20.65 ms      |
+
+Focusing on one head, this implementation is at most barely competitive:
+
+|   seq_len |   d_model | sparsity   | dense_time   | sparse_time   |
+|-----------|-----------|------------|--------------|---------------|
+|       512 |        64 | 95%        | 435.82 µs    | 1.58 ms       |
+|       512 |        64 | 99%        | 468.13 µs    | 334.99 µs     |
+|       512 |       256 | 95%        | 539.87 µs    | 3.91 ms       |
+|       512 |       256 | 99%        | 543.71 µs    | 906.73 µs     |
+|      1024 |        64 | 95%        | 1.54 ms      | 5.06 ms       |
+|      1024 |        64 | 99%        | 1.47 ms      | 1.28 ms       |
+|      1024 |       256 | 95%        | 1.95 ms      | 18.36 ms      |
+|      1024 |       256 | 99%        | 1.92 ms      | 3.41 ms       |
+
+## Step 2 - Nested tensors
+
 ...
+
+## Step 3 - Sparse MatMul
+
+As we saw in the profiling results, the PyTorch implementation suffers from the `index_select` operations. In the end, we don't really need to copy the vectors from the input matrices: we could access them directly in the original `Q` and `K` tensors to compute the relevant dot products `q_i^T k_j`.
+
+I implemented a `sparse_matmul` C++ operator for PyTorch to replace
+
+```python
+qs = q.index_select(1, indices[: , 0])
+ks = k.index_select(1, indices[: , 1])
+weights = (qs * ks).sum(dim=-1)
+```
+
+with 
+
+```python
+weights = sparse_matmul(q, k, indices)
+```
+
+I limited the operation to `T x D` tensors for `q` and `k` (i.e. no heads) for simplicity, and to this part of the computation because in this end it will look like a naive matrix multiplication.
+
+In [3_CPP Sparse MM](./notebooks/3_CPP%20Sparse%20MM.ipynb) I explore this option. Comparing the PyTorch version and the C++ operator, there is not a huge change, going from
+
+```
+----------------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                  Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg    # of Calls  
+----------------------  ------------  ------------  ------------  ------------  ------------  ------------  
+         ProfilerStep*        14.04%     324.161us       100.00%       2.309ms      76.971us            30  
+    aten::index_select        44.79%       1.034ms        45.10%       1.041ms      17.355us            60  
+             aten::mul        22.32%     515.473us        22.32%     515.473us      17.182us            30  
+             aten::sum        16.83%     388.585us        17.45%     402.876us      13.429us            30  
+            aten::view         0.91%      21.006us         0.91%      21.006us       0.350us            60  
+           aten::fill_         0.50%      11.582us         0.50%      11.582us       0.386us            30  
+           aten::empty         0.30%       7.042us         0.30%       7.042us       0.117us            60  
+         aten::flatten         0.19%       4.289us         0.19%       4.289us       0.071us            60  
+      aten::as_strided         0.12%       2.709us         0.12%       2.709us       0.090us            30  
+----------------------  ------------  ------------  ------------  ------------  ------------  ------------
+```
+
+to 
+
+```
+--------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                            Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg    # of Calls  
+--------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                   ProfilerStep*         7.46%     171.589us       100.00%       2.299ms      76.646us            30  
+    extension_cpp::sparse_matmul        67.30%       1.547ms        91.32%       2.100ms      69.993us            30  
+                aten::contiguous         0.28%       6.508us        23.77%     546.641us       6.074us            90  
+                     aten::clone         0.38%       8.624us        23.49%     540.133us      18.004us            30  
+                     aten::copy_        22.50%     517.305us        22.70%     521.885us      17.396us            30  
+                   aten::squeeze         1.03%      23.789us         1.22%      28.001us       0.467us            60  
+                     aten::empty         0.69%      15.787us         0.69%      15.787us       0.175us            90  
+                aten::empty_like         0.18%       4.127us         0.42%       9.624us       0.321us            30  
+                aten::as_strided         0.18%       4.212us         0.18%       4.212us       0.070us            60  
+--------------------------------  ------------  ------------  ------------  ------------  ------------  ------------ 
+```
+
+A lot of time is now freed from the `index_select` but spent in the operator, which makes sense since the dot products are not vectorized in this implementation (while they probably are in the `aten::mul`).
+
+Taking advantage of what I learned with the nested tensors, in particular the jagged layout, I implemented an alternative computation replacing the indices pairs `indices` with two tensors:
+
+ - `values` containing the `j` indices in $K$ (corresponding to `indices[:, 1]`)
+ - `offsets` telling where the values for a given query `i` in $Q$ end.
+
+It looks like this alternative implementation, `sparse_matmul_vo` is slightly more efficient:
+
+```
+-----------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                               Name    Self CPU %      Self CPU   CPU total %     CPU total  CPU time avg    # of Calls  
+-----------------------------------  ------------  ------------  ------------  ------------  ------------  ------------  
+                      ProfilerStep*         9.13%     156.958us       100.00%       1.719ms      57.310us            30  
+    extension_cpp::sparse_matmul_vo        88.74%       1.526ms        89.25%       1.534ms      51.148us            30  
+                      aten::squeeze         1.37%      23.624us         1.62%      27.920us       0.465us            60  
+                        aten::empty         0.39%       6.788us         0.39%       6.788us       0.226us            30  
+                   aten::as_strided         0.25%       4.296us         0.25%       4.296us       0.072us            60  
+                   aten::contiguous         0.11%       1.877us         0.11%       1.877us       0.031us            60  
+-----------------------------------  ------------  ------------  ------------  ------------  ------------  ------------ 
+```
+
+The full profiling [logs](./profiles/3_profile_bis.log) and [results](./profiles/1_profile_results_bis.md) are available in the `profiles/` folder:
+
+- `dense` is the masked attention baseline
+- `sparse` is the pure PyTorch implementation
+- `sparse_1` uses the `sparse_matmul` C++ op
+- `sparse_2` uses the `sparse_matmul_vo` C++ op
+
+We see nice improvements over the pure PyTorch implementation but the C++ ops are still not competitive at even 95% sparsity:
+
+|   seq_len |   d_model | sparsity   | dense_time   | sparse_time   | sparse_1_time   | sparse_2_time   |
+|-----------|-----------|------------|--------------|---------------|-----------------|-----------------|
+|       512 |        32 | 95%        | 329.05 µs    | 856.26 µs     | 582.22 µs       | 562.29 µs       |
+|       512 |        32 | 99%        | 309.37 µs    | 185.47 µs     | 164.03 µs       | 147.41 µs       |
+|       512 |        64 | 95%        | 356.32 µs    | 1.42 ms       | 847.18 µs       | 891.73 µs       |
+|       512 |        64 | 99%        | 342.89 µs    | 293.63 µs     | 194.96 µs       | 184.10 µs       |
+|       512 |       128 | 95%        | 416.40 µs    | 2.41 ms       | 1.47 ms         | 1.72 ms         |
+|       512 |       128 | 99%        | 407.72 µs    | 416.32 µs     | 335.98 µs       | 319.59 µs       |
+|      1024 |        32 | 95%        | 1.44 ms      | 3.56 ms       | 2.48 ms         | 2.28 ms         |
+|      1024 |        32 | 99%        | 1.40 ms      | 636.13 µs     | 479.02 µs       | 426.17 µs       |
+|      1024 |        64 | 95%        | 1.63 ms      | 4.95 ms       | 3.27 ms         | 3.04 ms         |
+|      1024 |        64 | 99%        | 1.39 ms      | 1.21 ms       | 724.29 µs       | 705.73 µs       |
+|      1024 |       128 | 95%        | 1.69 ms      | 9.68 ms       | 6.10 ms         | 5.66 ms         |
+|      1024 |       128 | 99%        | 1.62 ms      | 1.95 ms       | 1.26 ms         | 1.19 ms         |
+|      2048 |        32 | 95%        | 5.26 ms      | 13.99 ms      | 9.91 ms         | 9.30 ms         |
+|      2048 |        32 | 99%        | 5.15 ms      | 2.79 ms       | 2.02 ms         | 1.99 ms         |
+|      2048 |        64 | 95%        | 5.69 ms      | 22.27 ms      | 14.76 ms        | 13.79 ms        |
+|      2048 |        64 | 99%        | 5.49 ms      | 3.95 ms       | 3.05 ms         | 2.52 ms         |
+|      2048 |       128 | 95%        | 6.25 ms      | 38.80 ms      | 24.72 ms        | 23.69 ms        |
+|      2048 |       128 | 99%        | 6.14 ms      | 7.69 ms       | 5.05 ms         | 4.58 ms         |
+
+
+## Step 4 - Full C++ implementation
+
+
+## Going further
+
+### Vectorized dot products
+
+Could we modify the `sparse_matmul` or even `sparse_attn` to vectorize the operations (in particular the dot products computations)?
+
+### Sparse attention weights
+
+Could we modify the `sparse_matmul` so that it outputs a sparse tensor representation of $QK^T \odot \mathbf{M}$ and use PyTorch implementations for the rest?
+
+### Multihead support
+
+### Gradient implementation
+
+### CUDA kernels
