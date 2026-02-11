@@ -54,7 +54,7 @@ def profile_attention(
     attn_mask = BooleanMask.random(seq_len, sparsity)
 
     bool_mask = attn_mask.as_tensor(seq_len)
-    indices = attn_mask.to_indices()
+    sparse_mask = bool_mask.to_sparse_csr()
     k_indices, q_offsets = boolean_mask_to_jagged_indices(bool_mask)
 
     with profile_and_report("masked") as prof:
@@ -66,7 +66,7 @@ def profile_attention(
 
     with profile_and_report("sparse_masked") as prof:
         for _ in range(N_RUNS):
-            sparse_attention_masked(q, k, v, bool_mask)
+            sparse_attention_masked(q, k, v, sparse_mask)
             prof.step()
 
     sparse_masked_time = prof.key_averages().self_cpu_time_total / (N_RUNS - 20)

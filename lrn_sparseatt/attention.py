@@ -147,7 +147,7 @@ def sparse_attention_masked(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    attn_mask: torch.Tensor,
+    sparse_attn_mask: torch.Tensor,
 ) -> torch.Tensor:
     """Compute masked attention using torch.sparse for the query-key multiplication.
 
@@ -155,15 +155,15 @@ def sparse_attention_masked(
         q: Query tensor of shape [H, T, D]
         k: Key tensor of shape [H, T, D]
         v: Value tensor of shape [H, T, D]
-        attn_mask: Boolean tensor of shape [T, T] where True indicates positions that can attend to each other.
+        sparse_attn_mask: Sparse CSR tensor of shape [T, T] where non-zero values indicate positions that can attend to each other.
 
     Returns:
         Output tensor of shape [H, T, D]
     """
     # q, k, v have shape [H, T, D]
-    # attn_mask has shape [T, T]
+    # sparse_attn_mask has shape [T, T]
     head_dim = q.size(2)
-    sp_mask = attn_mask.to_sparse_csr().to(torch.float) * 0
+    sp_mask = sparse_attn_mask.to(torch.float) * 0
 
     sp_attn_weights = torch.sparse.sampled_addmm(
         sp_mask, q, k.transpose(-2, -1), beta=0.0, alpha=1.0 / (head_dim**0.5)
@@ -172,7 +172,7 @@ def sparse_attention_masked(
     # attn_weights has shape [H, T, T]
 
     # attn_mask shape should be broadcastable to attn_weights shape
-    attn_mask = attn_mask.unsqueeze(0)  # shape [1, T, T]
+    attn_mask = sparse_attn_mask.to_dense().unsqueeze(0)  # shape [1, T, T]
     attn_weights = attn_weights.masked_fill(~attn_mask, float("-inf"))
     attn_weights = torch.softmax(attn_weights, dim=-1)
     return torch.matmul(attn_weights, v)
