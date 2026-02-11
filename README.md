@@ -103,7 +103,21 @@ The compute environment not being completely isolated and running other applicat
 
 I consulted the following resources while iterating on this small project:
 
-...
+  - PyTorch operators:
+    - [`gather`](https://docs.pytorch.org/docs/stable/generated/torch.gather.html)
+    - [`scatter_add`](https://docs.pytorch.org/docs/stable/generated/torch.Tensor.scatter_add_.html#torch.Tensor.scatter_add_)
+    - [`index_select`](https://docs.pytorch.org/docs/stable/generated/torch.index_select.html)
+    - [`index_add`](https://docs.pytorch.org/docs/stable/generated/torch.Tensor.index_add_.html#torch.Tensor.index_add_)
+  - [PyTorch Profiler](https://docs.pytorch.org/docs/stable/profiler.html)
+  - C++ extensions
+    - [Custom C++ extensions tutorial](https://docs.pytorch.org/tutorials/advanced/cpp_custom_ops.html)
+    - [Example](https://github.com/pytorch/extension-cpp/tree/master/extension_cpp_stable)
+    - [LibTorch Stable ABI](https://docs.pytorch.org/docs/main/notes/libtorch_stable_abi.html)
+    - [Torch Stable C++ API docs](https://docs.pytorch.org/cppdocs/stable.html)
+  - [Nested tensors](https://docs.pytorch.org/docs/stable/nested.html)
+    - [... in Transformers](https://docs.pytorch.org/tutorials/intermediate/transformer_building_blocks.html)
+  - [Sparse tensors](https://docs.pytorch.org/docs/stable/sparse.html)
+    - [`sampled_addmm`](https://docs.pytorch.org/docs/stable/generated/torch.sparse.sampled_addmm.html)
 
 ## Step 1 - Pure PyTorch implementation
 
@@ -304,7 +318,15 @@ Focusing on one head, this implementation is at most barely competitive:
 
 ## Step 2 - Nested tensors
 
-...
+We can assume that all the queries, i.e. all $i \in \{1 ... N_q\}$ will be used with at least one key/value, i.e. $|\mathcal{C}(i)| \geq 1$. It seems wastedful to copy each $q_i$  $|\mathcal{C}(i)|$ times.
+
+While looking at ways to only select the set of keys corresponding to each individual query in turn, I came across [nested tensors](https://docs.pytorch.org/docs/stable/nested.html), which look particularly useful not to waste computation on padding in batches for example.
+
+I tried different things but struggled with reductions along the relevant variable size axes and ended up with a very inefficient implementation.
+
+I also tried to compute the attention for each query in turn on a selection of key/values using the vanilla code but this was also super inefficient.
+
+I let this exploration aside to focus on the C++ operator implementation, but learned about the [jagged layout](https://docs.pytorch.org/docs/stable/nested.html#data-layout-and-shape), which was useful later.
 
 ## Step 3 - Sparse MatMul
 
